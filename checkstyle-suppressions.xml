@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+        "-//Checkstyle//DTD SuppressionFilter Configuration 1.1//EN"
+        "https://checkstyle.org/dtds/suppressions_1_1.dtd">
+<suppressions>
+    <!-- Spring needs non-final classes for proxying. -->
+    <suppress checks="DesignForExtension" files=".*(Configuration|Controller|Service|Application)\.java"/>
+    <suppress checks="HideUtilityClassConstructor" files=".*Application\.java"/>
+
+    <!-- Controllers legitimately take many request parameters and branch on them. -->
+    <suppress checks="ParameterNumber|ReturnCount|MultipleStringLiterals" files=".*Controller\.java"/>
+    <suppress checks="ClassFanOutComplexity|ClassDataAbstractionCoupling" files=".*Controller\.java"/>
+    <suppress checks="ReturnCount|MultipleStringLiterals" files=".*(Service|Handler|Mapper)\.java"/>
+
+    <!--
+      Guard-clause early returns. Every one of these methods is a validation rule, a parser step or
+      a filesystem read whose shape is "if this precondition does not hold, there is nothing to say;
+      otherwise inspect further". Forcing them into a single exit point would mean nesting or a
+      result variable, both of which read worse than the guard.
+    -->
+    <suppress checks="ReturnCount" files=".*(Rules|Parser|Extractor|Spool|Command|MimeTypes|MailQuery|Monkey)\.java"/>
+
+    <!--
+      The rule classes quote specification section numbers repeatedly by design: a finding's
+      reference must name the section that defines that specific rule, so two rules from the same
+      section share a string that is coincidence, not duplication worth hoisting.
+    -->
+    <suppress checks="MultipleStringLiterals" files=".*Rules\.java"/>
+
+    <!--
+      Auto-configuration is a wiring class: coupling to every bean it constructs is the entire job,
+      and splitting it to satisfy a coupling metric would scatter the object graph for no gain.
+    -->
+    <suppress checks="ClassDataAbstractionCoupling|ClassFanOutComplexity"
+              files=".*SmtpTester(Web)?Configuration\.java"/>
+
+    <!--
+      ReceivedMailLogger builds one nested-record document; the "coupled classes" are the eight
+      nested views of that single record.
+    -->
+    <suppress checks="ClassDataAbstractionCoupling" files="ReceivedMailLogger\.java"/>
+
+    <!--
+      IngestMessageHandlerFactory is the bridge between the SMTP library's SPI and this application:
+      envelope, session, TLS facts, chaos injection and the mailbox all meet there by definition.
+      Splitting it to satisfy a coupling metric would only move the wiring somewhere less obvious.
+    -->
+    <suppress checks="ClassFanOutComplexity|ClassDataAbstractionCoupling"
+              files="IngestMessageHandlerFactory\.java"/>
+
+    <!--
+      Minting an X.509 certificate means naming the ASN.1 structures that go into it. The "coupled
+      classes" here are the BouncyCastle builder vocabulary for one certificate, not a design
+      problem that splitting the class would address.
+    -->
+    <suppress checks="ClassDataAbstractionCoupling|ClassFanOutComplexity"
+              files="TlsContextFactory\.java"/>
+
+    <!-- Tests are assertion-dense and change constantly; style enforcement there slows work down. -->
+    <suppress checks=".*" files=".*Test\.java"/>
+    <suppress checks=".*" files=".*MailFixtures\.java"/>
+
+    <!-- JTE writes these; they are build output, not source. -->
+    <suppress checks=".*" files=".*[\\/]generated-sources[\\/].*"/>
+</suppressions>

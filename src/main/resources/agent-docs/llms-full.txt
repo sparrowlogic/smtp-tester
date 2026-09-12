@@ -1,0 +1,241 @@
+# smtp-tester — full reference
+
+> A local SMTP server that captures mail instead of delivering it, with a web inbox, an RFC
+> compliance validator and an MCP server. It occupies MailHog/Mailpit's ports (1025 SMTP,
+> 8025 HTTP) and adds validation and an agent-facing tool surface. It ships as one container.
+> There is no library artifact and no Maven plugin: see "Not built, deliberately" at the end.
+
+---
+
+## 1. Running it
+
+```bash
+docker run --rm -p 1025:1025 -p 8025:8025 ghcr.io/sparrowlogic/smtp-tester
+```
+
+Point the application under test at `localhost:1025`. Nothing leaves the process: every message is
+stored, parsed and validated, and no upstream delivery is ever attempted.
+
+`AUTH` accepts any username and password by default, so a mail configuration that insists on
+credentials works unchanged. STARTTLS is off by default and can be switched to `OPTIONAL` or
+`REQUIRED`; a self-signed certificate is minted at startup unless you supply a keystore.
+
+To persist captured mail across restarts, mount a volume at `/data/mail`. To run entirely in
+memory, set `SMTP_TESTER_SPOOL_DIRECTORY=` (empty).
+
+### Security posture
+
+The inbox, the REST API and the MCP endpoint are **unauthenticated by design**, and SMTP accepts
+any credentials. This is a local testing tool; the control is not exposing the ports, not a
+password. Everything the UI displays arrived over SMTP from whatever could reach port 1025, so it
+is treated as hostile: message bodies are served only under `Content-Security-Policy: sandbox`,
+message ids are validated before they can become a filesystem path, and the SMTP password is never
+logged at any level.
+
+---
+
+## 2. Verifying a message from a test
+
+The reliable sequence is subscribe-then-act, not act-then-sleep:
+
+1. `GET /api/v1/messages/stream` and wait for the `ready` event.
+2. Trigger the behaviour that sends the mail.
+3. Wait for a `mail.received` event, whose `data` is the same JSON as `GET /api/v1/messages/{id}`.
+
+If polling is easier, `GET /api/v1/messages?inbox=<address>` returns newest-first and is cheap.
+Poll with a timeout that fails loudly rather than a fixed sleep. The recipient filter is called
+`inbox`, not `to`.
+
+An idle stream receives a `:keep-alive` comment every 20 seconds and is never timed out by the
+server, so waiting minutes for a nightly job is as safe as waiting milliseconds in a unit test.
+Beyond `smtp-tester.web.stream.max-subscribers` concurrent streams the endpoint answers `503`.
+
+Two different things replay missed mail, and they are not interchangeable. `?since=` takes an
+**ISO-8601 instant** and replays everything received at or after it, which is what covers mail sent
+in the moment between deciding to subscribe and the subscription opening. The `Last-Event-ID`
+request header takes a **message id** and is what a browser's `EventSource` sends automatically on
+reconnect. Either way the replay is capped at `smtp-tester.web.stream.replay-limit` messages. An
+unparseable `since` is rejected rather than ignored.
+
+---
+
+## 3. REST API
+
+All paths are relative to `smtp-tester.web.base-path`, which is empty by default.
+
+| Method and path | Returns |
+| --- | --- |
+| `GET /api/v1/inboxes` | every recipient address with message and failure counts |
+| `GET /api/v1/messages` | search by `inbox`, `from`, `subject`, `text`, `since`, `onlyFailed`, `limit` (default 50), `offset` |
+| `GET /api/v1/messages/{id}` | one parsed message with its validation findings |
+| `GET /api/v1/messages/{id}/validation` | the findings alone |
+| `GET /api/v1/messages/{id}/raw` | the exact bytes received, `message/rfc822` |
+| `GET /api/v1/messages/{id}/html` | the HTML part, under a sandbox CSP |
+| `GET /api/v1/messages/{id}/attachments/{index}` | one attachment, with its own content type |
+| `GET /api/v1/messages/stream` | server-sent events: `ready`, then `mail.received`; same filters, plus `Last-Event-ID` |
+| `DELETE /api/v1/messages/{id}` | delete one message |
+| `DELETE /api/v1/messages` | delete everything, or one inbox with `?inbox=` |
+| `GET /api/v1/tls/certificate` | the presented certificate, PEM |
+| `GET /api/v1/tls/identity` | what the certificate claims, parsed |
+| `GET /api/v1/chaos` | current chaos settings and fault counters |
+| `PUT /api/v1/chaos` | replace chaos settings |
+| `POST /api/v1/chaos/enable`, `POST /api/v1/chaos/disable` | master switch |
+| `DELETE /api/v1/chaos/faults` | reset the counters |
+
+`/api/v1/messages/{id}/html` is deliberately served on a sandboxed origin. Do not fetch it and
+re-render the result inside your own page.
+
+---
+
+## 4. MCP
+
+Streamable HTTP at `/mcp`, on the same port as the inbox — one container, one port, one URL.
+
+Read: `list_inboxes`, `list_recent_emails`, `search_emails`, `get_email`, `get_email_validation`,
+`get_email_attachment`.
+
+Destructive: `delete_email`, `clear_inbox`, `clear_all_inboxes`. These disappear from `tools/list`
+entirely when `smtp-tester.mcp.allow-delete=false`, rather than failing at call time.
+
+Chaos: `get_chaos_status`, `configure_chaos`, `reset_chaos_faults`.
+
+Documentation: `get_documentation` returns this reference or the short `/llms.txt` index.
+
+The usual flow is `list_inboxes` to discover addresses, `search_emails` to locate the message, then
+`get_email` to read it. Validation findings come back as part of the ordinary message view, so
+"did it arrive" and "was it correct" are one call, not two.
+
+---
+
+## 5. Validation
+
+Every received message is checked against the RFCs and each finding carries a severity and the
+rule it came from. `smtp-tester.validation.reject-on` decides what happens on the wire:
+
+- `ERROR` (default) — a MUST-level violation is refused with `550` during the SMTP conversation.
+- `WARNING` — SHOULD-level violations are refused too.
+- `NONE` — everything is accepted, and every finding is still recorded and reported.
+
+Rules cover the transport conversation, required and malformed headers, address syntax, MIME
+structure and encoding, and TLS. Coming from MailHog, `ERROR` is the setting that will surprise
+you: a fixture with no `Date:` header starts getting `550`s where it used to get `250`s. Start at
+`NONE`, read the findings, then tighten.
+
+Messages larger than `smtp-tester.smtp.max-message-size-bytes` are refused with `552 5.3.4`, and
+the limit bounds the transfer itself rather than being advertised and then ignored.
+
+DKIM (RFC 6376) is **not** verified. The enhanced status codes are reserved for it, but verifying a
+signature requires a live DNS lookup, and a validator that behaves differently on a laptop, in CI
+and offline is a worse default than not checking.
+
+---
+
+## 6. Chaos monkey
+
+Transport-level fault injection, off by default, for testing how the application under test behaves
+when its mail server misbehaves. Every probability is per-event, faults are counted, and
+`smtp-tester.chaos.seed` fixes the random sequence so a failing run reproduces.
+
+| Key | Default | |
+| --- | --- | --- |
+| `smtp-tester.chaos.enabled` | `false` | master switch |
+| `smtp-tester.chaos.accept-connection` | `0.99` | chance of **accepting** — note the inversion |
+| `smtp-tester.chaos.disconnect` | `0.005` | drop the session with no reply |
+| `smtp-tester.chaos.reject-sender` | `0.05` | refuse `MAIL FROM` with `451 4.3.0` |
+| `smtp-tester.chaos.reject-recipient` | `0.05` | refuse `RCPT TO` with `451 4.3.0` |
+| `smtp-tester.chaos.reject-auth` | `0.05` | fail `AUTH` |
+| `smtp-tester.chaos.throttle` | `0.1` | rate-limit a transfer |
+| `smtp-tester.chaos.min-bytes-per-second` | `1024` | slowest rate applied when throttling |
+| `smtp-tester.chaos.max-bytes-per-second` | `10240` | fastest rate applied when throttling |
+| `smtp-tester.chaos.seed` | *(none)* | fix the random sequence |
+
+The rejection codes are transient (`4xx`) on purpose: a correct client retries them.
+
+---
+
+## 7. Every configuration key
+
+Settable as a property, a `--flag`, or an environment variable. The environment form uppercases and
+replaces separators: `smtp-tester.smtp.port` is `SMTP_TESTER_SMTP_PORT`.
+
+| Key | Default | |
+| --- | --- | --- |
+| `smtp-tester.smtp.enabled` | `true` | `false` runs the UI/API/MCP with no listener |
+| `smtp-tester.smtp.port` | `1025` | `0` binds an ephemeral port |
+| `smtp-tester.smtp.bind-address` | all interfaces | |
+| `smtp-tester.smtp.host-name` | `smtp-tester` | announced in the SMTP greeting |
+| `smtp-tester.smtp.max-message-size-bytes` | `26214400` | rejected with `552 5.3.4` |
+| `smtp-tester.smtp.max-connections` | `200` | concurrent client connections |
+| `smtp-tester.smtp.max-recipients` | `1000` | `RCPT TO` per transaction |
+| `smtp-tester.smtp.connection-timeout` | `300000` | socket read timeout, milliseconds |
+| `smtp-tester.smtp.accept-any-credentials` | `true` | any `AUTH` succeeds |
+| `smtp-tester.smtp.tls.mode` | `OFF` | `OFF`, `OPTIONAL` or `REQUIRED` (STARTTLS) |
+| `smtp-tester.smtp.tls.hostname` | `localhost` | the name the generated certificate is issued for |
+| `smtp-tester.smtp.tls.keystore` | *(generated)* | PKCS#12 or JKS |
+| `smtp-tester.smtp.tls.keystore-password` | *(none)* | password for that keystore |
+| `smtp-tester.smtp.tls.key-alias` | *(none)* | which key in the keystore to present |
+| `smtp-tester.store.max-messages` | `1000` | oldest evicted beyond this |
+| `smtp-tester.spool.directory` | `/data/mail` in the container | empty disables writing to disk |
+| `smtp-tester.spool.retention-interval` | `30s` | how often the background sweep trims the directory |
+| `smtp-tester.spool.write-metadata` | `true` | also write `metadata.json` beside the raw message |
+| `smtp-tester.spool.write-parts` | `true` | decoded MIME parts under `parts/` |
+| `smtp-tester.spool.load-on-startup` | `true` | re-read the directory at boot |
+| `smtp-tester.validation.enabled` | `true` | |
+| `smtp-tester.validation.reject-on` | `ERROR` | `NONE`, `ERROR` or `WARNING` |
+| `smtp-tester.mcp.enabled` | `true` | |
+| `smtp-tester.mcp.allow-delete` | `true` | `false` hides the destructive tools |
+| `smtp-tester.mcp.max-body-characters` | `20000` | bodies are truncated past this in tool output |
+| `smtp-tester.mcp.default-limit` | `20` | page size for `list_recent_emails` when none is given |
+| `smtp-tester.logging.enabled` | `true` | the structured per-message log line |
+| `smtp-tester.logging.include-body` | `true` | turn off if bodies carry data you would rather not log |
+| `smtp-tester.logging.max-body-characters` | `2000` | truncation point for the logged body |
+| `smtp-tester.web.enabled` | `true` | |
+| `smtp-tester.web.base-path` | `""` | mount the UI under a prefix |
+| `smtp-tester.web.stream.enabled` | `true` | the server-sent events feed |
+| `smtp-tester.web.stream.heartbeat` | `20s` | keep-alive interval on an idle stream |
+| `smtp-tester.web.stream.max-subscribers` | `100` | beyond this, `503` |
+| `smtp-tester.web.stream.replay-limit` | `100` | most messages one `since` replay may send |
+| `server.port` | `8025` | UI, REST API and MCP |
+
+---
+
+## 8. The spool
+
+With a spool directory configured, every accepted message is written to disk as it arrives. The
+`.eml` files are byte-exact: no `Received:` header is inserted, so what is stored is what was sent.
+Decoded MIME parts are written under `parts/` unless `write-parts` is off, and the directory is
+re-read at startup so captured mail survives a restart.
+
+The directory is bounded independently of the in-memory store, by a background sweep that runs
+every `smtp-tester.spool.retention-interval` and trims it back to `store.max-messages`. Eviction
+does not delete from disk inline, so between sweeps the spool can briefly hold more than the store
+does — that is deliberate, to keep a recursive directory delete off the SMTP thread a client is
+waiting on. Deleting a message explicitly, through the API or MCP, still removes its files
+immediately.
+
+---
+
+## 9. Not built, deliberately
+
+Each of these is a decision rather than a gap:
+
+- **Running as a library inside a Spring Boot application.** Removed on purpose. Two shapes meant
+  two bean graphs and two ways for a feature to work in one and quietly not the other.
+- **A Maven plugin**, and **publishing to Maven Central**. Same reasoning; the image is the
+  deliverable. Use the container, or run it from Testcontainers.
+- **DKIM verification.** See section 5.
+- **Message release / forwarding to a real SMTP server.** It would turn a mail sink into a relay on
+  an unauthenticated API. The point of the tool is that mail cannot escape it.
+- **HTTP basic auth on the UI and API.** SMTP on 1025 accepts any credentials by design, so a
+  password on the inbox protects nothing port 1025 does not already give away.
+- **Implicit TLS on a second port.** STARTTLS only, which is what submission clients expect.
+
+---
+
+## 10. Coming from MailHog or Mailpit
+
+The ports and the SMTP behaviour match, so swapping the container is usually enough. Two things are
+not drop-in. The HTTP API is a different shape — MailHog returns
+`{ID, From:{Mailbox,Domain}, To[], Content, MIME, Raw}` and this returns the records documented
+above, so anything written against MailHog's API needs porting. And validation rejects by default;
+see section 5 for how to migrate without turning a passing suite red.

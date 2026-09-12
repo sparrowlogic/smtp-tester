@@ -1,0 +1,218 @@
+# CI runs the same `make agent-completion` a developer and the Claude Code stop hook run, so a
+# green local build and a green CI build mean the same thing. Anything CI checks that the local
+# gate does not would be a standard nobody can satisfy before pushing.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every action below is held at a major that declares `runs.using: node24`. Node 20 is
+# deprecated on the runners, and an action still on it makes the whole workflow log a
+# deprecation warning; node24 is the newest runtime the runner offers, so this is the
+# ceiling until GitHub ships a later one. Do not roll one back to an older major.
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 26
+        timeout-minutes: 5
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '26'
+          cache: maven
+
+      - name: make agent-completion
+        timeout-minutes: 12
+        run: make agent-completion
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+          if-no-files-found: warn
+
+  # `make audit` is the local equivalent, but OSS Index needs an account, so CI uses GitHub's own
+  # advisory database instead -- no secret to leak and nothing to expire. Dependabot
+  # (.github/dependabot.yml) opens the update PRs; this blocks one that would introduce a known
+  # vulnerable dependency.
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  # One job per architecture on a native runner rather than one job building both under QEMU: the
+  # build stage runs a full Maven compile inside the image, and emulating that compile would
+  # dominate the job. Each architecture also smoke-tests its own image, so "it starts" is proved on
+  # arm64 rather than assumed from amd64.
+  docker:
+    name: Container image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        timeout-minutes: 15
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          tags: smtp-tester:ci
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      # The README tells people to `docker run` this. A build that succeeds but produces an image
+      # that does not come up is the failure that reaches users first.
+      - name: Image starts and serves the inbox API
+        timeout-minutes: 5
+        run: |
+          docker run -d --name smtp-tester-ci \
+            -p 127.0.0.1:1025:1025 -p 127.0.0.1:8025:8025 smtp-tester:ci
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8025/api/v1/inboxes >/dev/null; then
+              echo "inbox API is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "container did not become healthy"
+          docker logs smtp-tester-ci
+          exit 1
+
+      # Everything below publishes, and is reached only after the smoke test above passed, so a tag
+      # can never point at an image that does not start. A pull request stops here; a fork's token
+      # is read-only regardless, so an untrusted change cannot publish.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest, with no tag. Tags are attached once, by the manifest job below, so that
+      # `latest` never briefly points at one architecture while the other is still building.
+      - name: Push by digest
+        timeout-minutes: 10
+        if: github.event_name != 'pull_request'
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Joins the per-architecture images into one multi-arch manifest and puts the human-facing tags
+  # on it. This is what makes `docker pull ghcr.io/sparrowlogic/smtp-tester` resolve correctly on
+  # both an x86 CI box and an Apple Silicon laptop.
+  publish:
+    name: Publish multi-arch manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: docker
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest
+        timeout-minutes: 5
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+      - name: Inspect what was published
+        run: |
+          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}

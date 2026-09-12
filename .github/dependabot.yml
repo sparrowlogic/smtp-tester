@@ -1,0 +1,36 @@
+# Keeping the dependency set current is a standing job, not something remembered at release time.
+# Grouped so a routine week is one PR to review rather than a dozen; anything with a CVE comes
+# through on its own regardless of the schedule.
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      spring:
+        patterns:
+          - "org.springframework*"
+      build-tooling:
+        patterns:
+          - "com.google.errorprone:*"
+          - "com.uber.nullaway:*"
+          - "com.puppycrawl.tools:*"
+          - "com.diffplug.spotless:*"
+          - "org.jacoco:*"
+          - "org.apache.maven.plugins:*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

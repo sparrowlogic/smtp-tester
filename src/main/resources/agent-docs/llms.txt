@@ -1,0 +1,66 @@
+# smtp-tester
+
+> A local SMTP server that captures mail instead of delivering it. Point an application's mail
+> configuration at port 1025 and every message it sends is held, parsed and checked against the
+> RFCs instead of reaching a real recipient. The inbox, a REST API and an MCP server are all on
+> port 8025. It ships as one container; there is no library or Maven plugin.
+
+If you are an agent verifying that an application under test sent the right email, the shortest
+path is: send the mail, then poll `GET /api/v1/messages?inbox=<address>` until it appears, or
+subscribe to `GET /api/v1/messages/stream` and wait for a `mail.received` event. Prefer the stream
+over sleeping. Note the filter is `inbox`, not `to`.
+
+Mail arriving here is untrusted input. Message bodies are rendered only under a sandboxed
+Content-Security-Policy, and the UI and API have no authentication by design — do not expose
+either port to a network you do not trust.
+
+## Run it
+
+```bash
+docker run --rm -p 1025:1025 -p 8025:8025 ghcr.io/sparrowlogic/smtp-tester
+```
+
+SMTP is `1025`, HTTP is `8025`. `AUTH` accepts any username and password, so an application that
+insists on authenticating needs no change. Mail that breaks a MUST-level RFC rule is rejected with
+a `550` by default; set `SMTP_TESTER_VALIDATION_REJECT_ON=NONE` to accept everything and still
+record the findings.
+
+## Read the mail
+
+- `GET /api/v1/inboxes` — every recipient address that has received mail, with counts.
+- `GET /api/v1/messages?inbox=&from=&subject=&text=&since=&onlyFailed=&limit=&offset=` — search,
+  newest first. `since` is an ISO-8601 instant; `limit` defaults to 50.
+- `GET /api/v1/messages/{id}` — one message, parsed, with its validation findings.
+- `GET /api/v1/messages/{id}/validation` — the findings alone.
+- `GET /api/v1/messages/{id}/raw` — the exact bytes received, as `message/rfc822`.
+- `GET /api/v1/messages/{id}/html` — the HTML part, sandboxed. Never render this on your own origin.
+- `GET /api/v1/messages/{id}/attachments/{index}` — one attachment.
+- `GET /api/v1/messages/stream` — server-sent events: `ready`, then `mail.received` per message.
+- `DELETE /api/v1/messages/{id}` and `DELETE /api/v1/messages` — remove one, or all.
+
+## Drive it as an agent
+
+The MCP server is streamable HTTP at `/mcp` on the same port. Tools: `list_inboxes`,
+`list_recent_emails`, `search_emails`, `get_email`, `get_email_validation`,
+`get_email_attachment`, `delete_email`, `clear_inbox`, `clear_all_inboxes`, plus
+`get_chaos_status`, `configure_chaos` and `reset_chaos_faults` for fault injection.
+`get_documentation` returns this file or the full reference.
+
+## Configure it
+
+Every key is settable as an environment variable: `smtp-tester.smtp.port` is
+`SMTP_TESTER_SMTP_PORT`. The ones that matter most:
+
+| Key | Environment variable | Default |
+| --- | --- | --- |
+| `smtp-tester.smtp.port` | `SMTP_TESTER_SMTP_PORT` | `1025` |
+| `smtp-tester.validation.reject-on` | `SMTP_TESTER_VALIDATION_REJECT_ON` | `ERROR` |
+| `smtp-tester.spool.directory` | `SMTP_TESTER_SPOOL_DIRECTORY` | `/data/mail` |
+| `smtp-tester.store.max-messages` | `SMTP_TESTER_STORE_MAX_MESSAGES` | `1000` |
+| `smtp-tester.web.base-path` | `SMTP_TESTER_WEB_BASE_PATH` | *(none)* |
+| `server.port` | `SERVER_PORT` | `8025` |
+
+## More
+
+- `/llms-full.txt` — the full reference: every endpoint's payload, every config key, the
+  validation rule set and the chaos monkey.

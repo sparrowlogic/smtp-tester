@@ -1,0 +1,20 @@
+# Ephemeral ports everywhere: the test suite must never collide with a real smtp-tester,
+# a MailHog, or another test running concurrently on 1025/8025.
+server:
+  port: 0
+smtp-tester:
+  smtp:
+    port: 0
+logging:
+  level:
+    org.subethamail: WARN
+    smtp-tester.mail.received: WARN
+
+# The standalone application sets these in SpringApplication.setDefaultProperties, which
+# @SpringBootTest does not run; the MCP endpoint is otherwise not mapped and McpEndpointTest 404s.
+spring:
+  ai:
+    mcp:
+      server:
+        protocol: streamable
+        name: smtp-tester
