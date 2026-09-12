@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Standalone-only logging. This file is NOT named logback-spring.xml on purpose: that name is
+  picked up automatically by any Spring Boot application with this jar on its classpath, which
+  would hijack the host application's logging. It is activated by logging.config, which
+  SmtpTesterApplication sets as a default property and only when it is the class booting the app.
+
+  Two appenders. Ordinary application logs use Boot's own console appender, included rather than
+  copied so the %clr / %wEx conversion words are registered and the format tracks Boot's. The
+  smtptester.mail.received logger instead gets a bare %msg%n appender with additivity off, so the
+  per-message JSON documents come out of stdout as clean, one-per-line JSON objects that
+  `docker logs smtp-tester | jq` reads without any filtering.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <appender name="MAIL_JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="smtptester.mail.received" level="INFO" additivity="false">
+        <appender-ref ref="MAIL_JSON"/>
+    </logger>
+
+    <!-- The library is chatty at DEBUG about every SMTP verb; INFO is the useful level. -->
+    <logger name="org.subethamail" level="INFO"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

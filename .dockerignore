@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.idea/
+.kiro/
+.claude/
+*.iml
+.classpath
+.project
+.settings/
+.factorypath
+spool/
+*.log

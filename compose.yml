@@ -1,0 +1,24 @@
+# Drop-in replacement for a MailHog or Mailpit service in an existing compose file: the ports
+# and the SMTP behaviour are the same, and the inbox lives at the same place.
+services:
+  smtp-tester:
+    image: ghcr.io/jackdpeterson/smtp-tester:latest
+    # Or build locally:  build: .
+    # Bound to loopback deliberately. This server accepts mail from anyone who can reach it and
+    # serves an unauthenticated inbox, REST API and MCP endpoint that can read and delete all of
+    # it, so the default must not be reachable from the network the host is on. Drop the
+    # "127.0.0.1:" prefix only for a private network you control -- see SECURITY.md.
+    ports:
+      - "127.0.0.1:1025:1025"   # SMTP
+      - "127.0.0.1:8025:8025"   # inbox UI, REST API and MCP endpoint (/mcp)
+    environment:
+      # Keep every received message on disk so it can be diffed byte-for-byte between runs.
+      SMTPTESTER_SPOOL_DIRECTORY: /data/mail
+      # ERROR rejects mail that breaks a MUST-level rule, which is the point of this server.
+      # Set NONE for lenient, MailHog-compatible behaviour.
+      SMTPTESTER_VALIDATION_REJECTON: ERROR
+    volumes:
+      - mail:/data/mail
+
+volumes:
+  mail:

@@ -1,0 +1,2 @@
+com.sparrowlogic.smtptester.config.SmtpTesterAutoConfiguration
+com.sparrowlogic.smtptester.web.SmtpTesterWebAutoConfiguration
