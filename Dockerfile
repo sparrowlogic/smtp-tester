@@ -4,7 +4,7 @@
 # The build stage needs a full JDK: the jte-maven-plugin precompiles every template into Java
 # classes that are then compiled into the jar. Without that step the running container would look
 # for src/main/jte on disk, not find it, and serve 404s for the whole UI.
-FROM eclipse-temurin:26-jdk AS build
+FROM eclipse-temurin:27-jdk AS build
 WORKDIR /build
 
 # Dependencies first, in their own layer, so editing source does not re-download the world.
@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -q package -DskipTests \
     && cp target/*-exec.jar /build/app.jar
 
 # ---- runtime --------------------------------------------------------------
-FROM eclipse-temurin:26-jre
+FROM eclipse-temurin:27-jre
 LABEL org.opencontainers.image.title="smtp-tester" \
       org.opencontainers.image.description="SMTP testing server with a web inbox, RFC compliance validation and an MCP server" \
       org.opencontainers.image.source="https://github.com/sparrowlogic/smtp-tester" \
