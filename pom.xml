@@ -55,7 +55,7 @@
         <jte.version>3.2.4</jte.version>
         <jspecify.version>1.0.1</jspecify.version>
         <subethasmtp.version>7.2.2</subethasmtp.version>
-        <bouncycastle.version>1.86</bouncycastle.version>
+        <bouncycastle.version>1.87</bouncycastle.version>
 
         <errorprone.version>2.50.0</errorprone.version>
         <nullaway.version>0.14.1</nullaway.version>
